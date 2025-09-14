@@ -1,0 +1,23 @@
+React Native is an open-source framework created by Meta (formerly Facebook) for building mobile applications using JavaScript and React.
+
+Key Features:
+1. Cross-Platform: Developers can write one codebase and run it on both iOS and Android.
+2. Hot Reloading: Speeds up development by allowing changes to be seen instantly without rebuilding the app.
+3. Native Modules: Provides the flexibility to integrate native Objective-C, Swift, Java, or Kotlin code when necessary.
+4. Rich Ecosystem: Large community support with libraries for navigation, animations, and state management.
+5. Performance: Uses a bridge to communicate with native components, and newer versions leverage JSI and Fabric for improved performance.
+
+Common Use Cases:
+- Building consumer apps like e-commerce, social media, or chat applications.
+- Enterprise solutions where time-to-market is critical.
+- Prototyping mobile apps quickly.
+
+Limitations:
+- Performance-heavy apps (like advanced 3D games) may still require full native development.
+- Dependency on third-party libraries for some advanced features.
+
+Example:
+With React Native, you can write a `Button` component once and use it across both platforms. The framework handles the rendering logic for iOS and Android.
+
+Summary:
+React Native accelerates mobile development by combining the productivity of web technologies with the power of native platforms.
