@@ -1,0 +1,54 @@
+# OS
+.DS_Store
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+rag_app/__pycache__
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Env and secrets
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test/coverage tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Caches
+.cache/
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# App data
+uploads/
+
+# Misc logs
+*.log
+
+# Pyenv
+.python-version
