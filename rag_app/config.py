@@ -1,4 +1,12 @@
 import os
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    def load_dotenv(*args, **kwargs):  # type: ignore
+        return False
+
+# Load env vars from a .env file if present (optional dependency)
+load_dotenv()
 
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3.2:3b")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -21,3 +29,14 @@ SPACY_LANGUAGE = os.getenv("SPACY_LANGUAGE", "en")
 
 DEDUP_METHOD = os.getenv("DEDUP_METHOD", "none").lower()  # 'none' | 'exact' | 'semantic'
 DEDUP_SIM_THRESHOLD = float(os.getenv("DEDUP_SIM_THRESHOLD", "0.96"))
+
+# Postgres (pgvector) settings
+PGHOST = os.getenv("PGHOST", "localhost")
+PGPORT = int(os.getenv("PGPORT", "5432"))
+PGUSER = os.getenv("PGUSER", os.getenv("USER", ""))
+PGPASSWORD = os.getenv("PGPASSWORD", "")
+PGDATABASE = os.getenv("PGDATABASE", "docpro")
+
+# Embedding dimension used in Postgres `chunks.embedding`
+# Ensure this matches the model behind EMBED_MODEL
+PG_EMBED_DIM = int(os.getenv("PG_EMBED_DIM", "768"))
