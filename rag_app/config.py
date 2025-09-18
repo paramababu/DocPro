@@ -5,7 +5,6 @@ except Exception:
     def load_dotenv(*args, **kwargs):  # type: ignore
         return False
 
-# Load env vars from a .env file if present (optional dependency)
 load_dotenv()
 
 LLAMA_MODEL = os.getenv("LLAMA_MODEL", "llama3.2:3b")
@@ -32,4 +31,3 @@ SPACY_LANGUAGE = os.getenv("SPACY_LANGUAGE", "en")
 DEDUP_METHOD = os.getenv("DEDUP_METHOD", "none").lower()  # 'none' | 'exact' | 'semantic'
 DEDUP_SIM_THRESHOLD = float(os.getenv("DEDUP_SIM_THRESHOLD", "0.96"))
 
-# Removed Postgres/pgvector settings in SQLite mode

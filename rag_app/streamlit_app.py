@@ -142,7 +142,7 @@ def _delete_file_by_path_tx(cur, repo_id: int, path: str) -> None:
 # (No DB admin tools in POC)
 
 
-def index_uploaded_files(files) -> tuple[int, int, int]:
+def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, int]:
     repo_id = _ensure_session_repo()
     os.makedirs(config.UPLOADS_PATH, exist_ok=True)
 
@@ -174,9 +174,17 @@ def index_uploaded_files(files) -> tuple[int, int, int]:
                 _log.info("Saved upload | path=%s size=%s", save_path, os.path.getsize(save_path))
                 text = loader.load_file(save_path)
                 _log.info("Loaded text | path=%s chars=%s", save_path, len(text))
-                # POC: simple character chunking without overlap to avoid duplicates
+                # Chunk using configured method (semantic or character)
                 t_chunk = time.perf_counter()
-                chunks = loader.character_chunk_text(text, chunk_size=config.CHUNK_SIZE, overlap=0)
+                chunks = loader.chunk_text(
+                    text,
+                    chunk_size=config.CHUNK_SIZE,
+                    overlap=0,  # no hard overlap; semantic splitter uses token_overlap internally
+                    method=config.CHUNKING_METHOD,
+                    token_target=config.CHUNK_SIZE_TOKENS,
+                    token_overlap=config.CHUNK_OVERLAP_TOKENS,
+                    sim_threshold=float(getattr(config, "SEMANTIC_SIM_THRESHOLD", 0.75)),
+                )
                 _log.info("Chunked | path=%s chunks=%s elapsed=%.3fs", save_path, len(chunks), time.perf_counter() - t_chunk)
                 for ci, ch in enumerate(chunks):
                     _log.debug("Chunk %s | len=%s | head=%r", ci, len(ch), _snip(ch))
@@ -204,27 +212,46 @@ def index_uploaded_files(files) -> tuple[int, int, int]:
 
                 if not unique_pairs:
                     _log.info("All chunks for %s already exist; skipping.", save_path)
+                    if progress:
+                        progress.progress(100)
+                        if ptext:
+                            ptext.text(f"{uf.name}: 0/0 new chunks (all duplicates)")
                     conn.commit()
                     file_count += 1
                     continue
 
+                # Progress-aware embedding and insert in batches
+                total = len(unique_pairs)
+                processed = 0
+                BATCH = 32
                 t_emb = time.perf_counter()
-                vecs = embedder.embed_texts([c for _, c, _ in unique_pairs])
-                if len(vecs):
-                    _log.info("Embedded | path=%s dim=%s count=%s elapsed=%.3fs", save_path, len(vecs[0]), len(vecs), time.perf_counter() - t_emb)
-                else:
-                    _log.info("Embedded | path=%s dim=%s count=%s elapsed=%.3fs", save_path, 0, 0, time.perf_counter() - t_emb)
-                for ci, ((idx, chunk, h), vec) in enumerate(zip(unique_pairs, vecs)):
-                    _log.debug("Embed head for chunk %s | %s", ci, [float(x) for x in vec[:8].tolist()])
-                    emb_blob = vec_to_blob(vec)
-                    cur.execute(
-                        "INSERT OR IGNORE INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (file_id, idx, chunk, emb_blob, repo_id, save_path, h),
-                    )
-                    if cur.rowcount:
-                        existing_hashes.add(h)
-                        chunk_count += 1
-                        _log.debug("Inserted chunk | file_id=%s idx=%s len=%s hash=%s", file_id, idx, len(chunk), h[:8])
+                for start in range(0, total, BATCH):
+                    batch = unique_pairs[start:start + BATCH]
+                    texts = [c for _, c, _ in batch]
+                    vecs = embedder.embed_texts(texts)
+                    for (idx, chunk, h), vec in zip(batch, vecs):
+                        emb_blob = vec_to_blob(vec)
+                        cur.execute(
+                            "INSERT OR IGNORE INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (file_id, idx, chunk, emb_blob, repo_id, save_path, h),
+                        )
+                        if cur.rowcount:
+                            existing_hashes.add(h)
+                            chunk_count += 1
+                            _log.debug("Inserted chunk | file_id=%s idx=%s len=%s hash=%s", file_id, idx, len(chunk), h[:8])
+                    processed += len(batch)
+                    # Update progress UI
+                    if progress:
+                        pct = int(processed * 100 / total)
+                        progress.progress(min(pct, 100))
+                        if ptext:
+                            ptext.text(f"{uf.name}: {processed}/{total} chunks indexed")
+                _log.info(
+                    "Embedded+Inserted | path=%s count=%s elapsed=%.3fs",
+                    save_path,
+                    total,
+                    time.perf_counter() - t_emb,
+                )
                 _log.info("Inserted file | file_id=%s path=%s new_chunks=%s skipped_dupes=%s", file_id, save_path, len(vecs), len(chunks) - len(unique_pairs))
                 file_count += 1
                 # Commit after each file to shorten write lock window
@@ -247,13 +274,16 @@ ensure_schema()
 uploaded = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf","docx","doc","txt"], accept_multiple_files=True)
 if uploaded:
     if st.button("Index uploaded file(s)"):
+        progress = st.progress(0)
+        ptext = st.empty()
         with st.spinner("Indexing files into SQLite..."):
             try:
-                rid, n_files, n_chunks = index_uploaded_files(uploaded)
+                rid, n_files, n_chunks = index_uploaded_files(uploaded, progress=progress, ptext=ptext)
             except Exception as e:
                 st.error(f"Indexing failed: {e}")
                 st.info("If this is a vector dimension mismatch, use 'Reset DB' in the sidebar and re-index.")
             else:
+                progress.progress(100)
                 if n_files == 0 and n_chunks == 0:
                     st.info("Files already indexed (no changes).")
                 else:
