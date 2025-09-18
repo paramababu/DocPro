@@ -9,7 +9,7 @@ _PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
-from rag_app.db import get_conn
+from rag_app.db import get_conn, blob_to_vec
 from rag_app import embedder
 
 _log = logging.getLogger("docpro.search")
@@ -24,26 +24,28 @@ def search_db(query, top_k=5):
     cur = conn.cursor()
 
     t0 = time.perf_counter()
-    q_emb = embedder.embed_texts([query])[0].tolist()
-    _log.info("embedded query | dim=%s elapsed=%.3fs", len(q_emb), time.perf_counter() - t0)
-    vec_str = "[" + ",".join(str(float(x)) for x in q_emb) + "]"
+    q_vec = embedder.embed_texts([query])[0]
+    _log.info("embedded query | dim=%s elapsed=%.3fs", len(q_vec), time.perf_counter() - t0)
 
     cur.execute(
         """
-        SELECT files.path, chunks.content, chunks.embedding <=> %s::vector AS distance
+        SELECT files.path, chunks.content, chunks.embedding
         FROM chunks
         JOIN files ON chunks.file_id = files.file_id
-        ORDER BY chunks.embedding <=> %s::vector
-        LIMIT %s
-        """,
-        (vec_str, vec_str, top_k),
+        """
     )
-    results = cur.fetchall()
-    for i, (content, dist) in enumerate(results):
-        _log.debug("res[%s] score=%.3f head=%r", i, 1 - float(dist), content[:160] + ("…" if len(content) > 160 else ""))
+    rows = cur.fetchall()
     cur.close()
     conn.close()
-    return results
+
+    scored = []
+    for r in rows:
+        path, content, blob = r[0], r[1], r[2]
+        vec = blob_to_vec(blob)
+        score = embedder.cosine_sim(q_vec, vec)
+        scored.append((path, content, 1.0 - float(score)))
+    scored.sort(key=lambda x: x[2])
+    return scored[:top_k]
 
 def ask_llama(query, results):
     # Build context from retrieved chunks

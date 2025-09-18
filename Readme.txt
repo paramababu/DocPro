@@ -17,19 +17,15 @@ run ollama
     ollama pull llama3.2:3b
     ollama pull nomic-embed-text
 
-Postgres setup (pgvector)
-    # Set env (or .env) as needed
-    # PGHOST=localhost, PGPORT=5432, PGUSER=<you>, PGPASSWORD=, PGDATABASE=docpro
-    # PG_EMBED_DIM must match your embed model (nomic-embed-text -> 768)
+SQLite setup
+    # Default DB path: rag_app/../docpro.sqlite3 (config.DB_PATH)
+    # No DB install needed. Schema is auto-created.
 
-    # Ingest a project/repo into Postgres (creates tables if missing)
-    python -m rag_app.pg_ingest  # defaults to current folder
-
-Run UI (Postgres-backed only):
+Run UI (SQLite-backed):
     streamlit run rag_app/streamlit_app.py
 
 Maintenance utilities
-    # List repos stored in Postgres
+    # List repos stored in SQLite
     python -m rag_app.pg_utils list
 
     # Prune session repos older than 24 hours (default)

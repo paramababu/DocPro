@@ -24,19 +24,12 @@ TOP_K = int(os.getenv("TOP_K", "5"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 UPLOADS_PATH = "uploads"
 
-USE_SPACY_SENTENCIZER = os.getenv("USE_SPACY_SENTENCIZER", "true").lower() in ("1", "true", "yes", "on")
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "docpro.sqlite3"))
+
+USE_SPACY_SENTENCIZER = os.getenv("USE_SPACY_SENTENCIZER", "false").lower() in ("1", "true", "yes", "on")
 SPACY_LANGUAGE = os.getenv("SPACY_LANGUAGE", "en")
 
 DEDUP_METHOD = os.getenv("DEDUP_METHOD", "none").lower()  # 'none' | 'exact' | 'semantic'
 DEDUP_SIM_THRESHOLD = float(os.getenv("DEDUP_SIM_THRESHOLD", "0.96"))
 
-# Postgres (pgvector) settings
-PGHOST = os.getenv("PGHOST", "localhost")
-PGPORT = int(os.getenv("PGPORT", "5432"))
-PGUSER = os.getenv("PGUSER", os.getenv("USER", ""))
-PGPASSWORD = os.getenv("PGPASSWORD", "")
-PGDATABASE = os.getenv("PGDATABASE", "docpro")
-
-# Embedding dimension used in Postgres `chunks.embedding`
-# Ensure this matches the model behind EMBED_MODEL
-PG_EMBED_DIM = int(os.getenv("PG_EMBED_DIM", "768"))
+# Removed Postgres/pgvector settings in SQLite mode

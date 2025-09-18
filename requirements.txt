@@ -4,5 +4,3 @@ pypdf==4.3.1
 docx2txt==0.8
 python-dotenv==1.0.1
 ollama==0.3.1
-spacy==3.7.5
-psycopg2-binary==2.9.9

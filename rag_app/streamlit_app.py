@@ -4,13 +4,14 @@ import time
 import logging
 import streamlit as st
 import ollama
+import hashlib
 
 # Ensure project root (parent of this folder) is on sys.path
 _PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
-from rag_app.db import get_conn, ensure_schema
+from rag_app.db import get_conn, ensure_schema, vec_to_blob, blob_to_vec
 from rag_app import embedder, config, loader
 
 
@@ -35,40 +36,45 @@ def search_db(query, top_k=5, *, repo_id: int | None = None):
     cur = conn.cursor()
 
     _log.info("Embedding query…")
-    q_emb = embedder.embed_texts([query])[0].tolist()
-    _log.debug("Query embed dim=%s head=%s", len(q_emb), [float(x) for x in q_emb[:8]])
-    vec_str = "[" + ",".join(str(float(x)) for x in q_emb) + "]"
+    q_vec = embedder.embed_texts([query])[0]
+    _log.debug("Query embed dim=%s head=%s", len(q_vec), [float(x) for x in q_vec[:8]])
 
     if repo_id is not None:
         cur.execute(
             """
-            SELECT path, content, embedding <=> %s::vector AS distance
+            SELECT files.path, chunks.content, chunks.embedding
             FROM chunks
             JOIN files ON chunks.file_id = files.file_id
-            WHERE files.repo_id = %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
+            WHERE files.repo_id = ?
             """,
-            (vec_str, repo_id, vec_str, top_k),
+            (repo_id,),
         )
     else:
-        # Fallback: search across all data (not typical for this POC)
         cur.execute(
             """
-            SELECT path, content, embedding <=> %s::vector AS distance
+            SELECT files.path, chunks.content, chunks.embedding
             FROM chunks
             JOIN files ON chunks.file_id = files.file_id
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (vec_str, vec_str, top_k),
+            """
         )
-    results = cur.fetchall()
-    for i, (path, content, dist) in enumerate(results):
-        _log.debug("Result[%s] path=%s score=%.4f head=%r", i, path, 1 - float(dist), _snip(content))
+    rows = cur.fetchall()
     cur.close()
     conn.close()
+
+    # Rank in Python (cosine similarity)
+    scored = []
+    for r in rows:
+        path, content, emb_blob = r[0], r[1], r[2]
+        if emb_blob is None:
+            continue
+        cvec = blob_to_vec(emb_blob)
+        score = embedder.cosine_sim(q_vec, cvec)
+        scored.append((path, content, float(score)))
+    scored.sort(key=lambda x: x[2], reverse=True)
+    results = [(p, c, 1.0 - s) for (p, c, s) in scored[:top_k]]
     _log.info("search_db done | rows=%s elapsed=%.3fs", len(results), time.perf_counter() - t0)
+    for i, (path, content, dist) in enumerate(results):
+        _log.debug("Result[%s] path=%s score=%.4f head=%r", i, path, 1 - float(dist), _snip(content))
     return results
 
 def ask_llama(query, results):
@@ -99,13 +105,14 @@ def _ensure_session_repo() -> int:
         return int(st.session_state["repo_id"])
     _log.info("Creating new session repo")
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO repos (url, branch) VALUES (%s, %s) RETURNING repo_id",
-                ("streamlit://session", "session"),
-            )
-            rid = int(cur.fetchone()[0])
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO repos (url, branch) VALUES (?, ?)",
+            ("streamlit://session", "session"),
+        )
+        rid = int(cur.lastrowid)
         conn.commit()
+        cur.close()
     st.session_state["repo_id"] = rid
     _log.info("Session repo created | repo_id=%s", rid)
     return rid
@@ -115,12 +122,21 @@ def _delete_file_by_path(repo_id: int, path: str) -> None:
     # Remove an existing file (and cascaded chunks) for this repo, if present
     _log.debug("Deleting existing file if present | repo_id=%s path=%s", repo_id, path)
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM files WHERE repo_id = %s AND path = %s",
-                (int(repo_id), path),
-            )
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM files WHERE repo_id = ? AND path = ?",
+            (int(repo_id), path),
+        )
         conn.commit()
+        cur.close()
+
+
+def _delete_file_by_path_tx(cur, repo_id: int, path: str) -> None:
+    # Same as above but uses existing transaction/cursor to avoid cross-conn locks
+    cur.execute(
+        "DELETE FROM files WHERE repo_id = ? AND path = ?",
+        (int(repo_id), path),
+    )
 
 
 # (No DB admin tools in POC)
@@ -143,8 +159,15 @@ def index_uploaded_files(files) -> tuple[int, int, int]:
     file_count = 0
     chunk_count = 0
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            for uf in files:
+        cur = conn.cursor()
+        # Preload existing content hashes for this repo
+        try:
+            cur.execute("SELECT content_hash FROM chunks WHERE repo_id = ? AND content_hash IS NOT NULL", (repo_id,))
+            existing_hashes = {row[0] for row in cur.fetchall()}
+        except Exception:
+            existing_hashes = set()
+
+        for uf in files:
                 save_path = os.path.join(config.UPLOADS_PATH, uf.name)
                 with open(save_path, "wb") as f:
                     f.write(uf.getbuffer())
@@ -159,48 +182,72 @@ def index_uploaded_files(files) -> tuple[int, int, int]:
                     _log.debug("Chunk %s | len=%s | head=%r", ci, len(ch), _snip(ch))
                 if not chunks:
                     continue
-                # Idempotent per file: drop existing row for same path if exists
-                _delete_file_by_path(repo_id, save_path)
+                # Idempotent per file: drop existing row for same path if exists (same tx)
+                _delete_file_by_path_tx(cur, repo_id, save_path)
                 cur.execute(
-                    "INSERT INTO files (repo_id, path, file_type) VALUES (%s, %s, %s) RETURNING file_id",
+                    "INSERT INTO files (repo_id, path, file_type) VALUES (?, ?, ?)",
                     (repo_id, save_path, os.path.splitext(save_path)[1]),
                 )
-                file_id = int(cur.fetchone()[0])
+                file_id = int(cur.lastrowid)
+                # Deduplicate by content hash within repo before embedding
+                def _hash_text(s: str) -> str:
+                    return hashlib.sha256(s.strip().encode("utf-8", errors="ignore")).hexdigest()
+
+                unique_pairs = []  # (idx, chunk, hash)
+                seen_local = set()
+                for idx, chunk in enumerate(chunks):
+                    h = _hash_text(chunk)
+                    if h in existing_hashes or h in seen_local:
+                        continue
+                    seen_local.add(h)
+                    unique_pairs.append((idx, chunk, h))
+
+                if not unique_pairs:
+                    _log.info("All chunks for %s already exist; skipping.", save_path)
+                    conn.commit()
+                    file_count += 1
+                    continue
+
                 t_emb = time.perf_counter()
-                vecs = embedder.embed_texts(chunks)
+                vecs = embedder.embed_texts([c for _, c, _ in unique_pairs])
                 if len(vecs):
                     _log.info("Embedded | path=%s dim=%s count=%s elapsed=%.3fs", save_path, len(vecs[0]), len(vecs), time.perf_counter() - t_emb)
                 else:
                     _log.info("Embedded | path=%s dim=%s count=%s elapsed=%.3fs", save_path, 0, 0, time.perf_counter() - t_emb)
-                for ci, (ch, vec) in enumerate(zip(chunks, vecs)):
+                for ci, ((idx, chunk, h), vec) in enumerate(zip(unique_pairs, vecs)):
                     _log.debug("Embed head for chunk %s | %s", ci, [float(x) for x in vec[:8].tolist()])
-                for idx, (chunk, vec) in enumerate(zip(chunks, vecs)):
-                    emb = [float(x) for x in vec.tolist()]
+                    emb_blob = vec_to_blob(vec)
                     cur.execute(
-                        "INSERT INTO chunks (file_id, chunk_index, content, embedding) VALUES (%s, %s, %s, %s)",
-                        (file_id, idx, chunk, emb),
+                        "INSERT OR IGNORE INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (file_id, idx, chunk, emb_blob, repo_id, save_path, h),
                     )
-                    _log.debug("Inserted chunk | file_id=%s idx=%s len=%s", file_id, idx, len(chunk))
-                _log.info("Inserted file | file_id=%s path=%s chunks=%s", file_id, save_path, len(chunks))
+                    if cur.rowcount:
+                        existing_hashes.add(h)
+                        chunk_count += 1
+                        _log.debug("Inserted chunk | file_id=%s idx=%s len=%s hash=%s", file_id, idx, len(chunk), h[:8])
+                _log.info("Inserted file | file_id=%s path=%s new_chunks=%s skipped_dupes=%s", file_id, save_path, len(vecs), len(chunks) - len(unique_pairs))
                 file_count += 1
-                chunk_count += len(chunks)
+                # Commit after each file to shorten write lock window
+                conn.commit()
+        # Final commit safeguard
         conn.commit()
+        cur.close()
     _log.info("Indexing complete | repo_id=%s files=%s chunks=%s", repo_id, file_count, chunk_count)
     st.session_state["_indexed_fps"] = fps
     return repo_id, file_count, chunk_count
 
 # Streamlit UI
 st.set_page_config(page_title="DocPro RAG", layout="wide")
-st.title(" Ask Your File (Postgres + Ollama)")
+st.title(" Ask Your File (SQLite + Ollama)")
 
 # Ensure schema (no admin UI in POC)
 _log.info("Ensuring DB schema")
-ensure_schema(config.PG_EMBED_DIM)
+ensure_schema()
 
 uploaded = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf","docx","doc","txt"], accept_multiple_files=True)
 if uploaded:
     if st.button("Index uploaded file(s)"):
-        with st.spinner("Indexing files into Postgres..."):
+        with st.spinner("Indexing files into SQLite..."):
             try:
                 rid, n_files, n_chunks = index_uploaded_files(uploaded)
             except Exception as e:
