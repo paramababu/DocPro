@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
-from dataclasses import dataclass
-from typing import Iterable, List, Dict
+from typing import List
 
 from pypdf import PdfReader
 import docx2txt
@@ -22,21 +21,16 @@ from . import embedder
 import numpy as np
 
 
-@dataclass
-class DocumentChunk:
-    text: str
-    metadata: Dict[str, str]
-
-
-# ---- File loaders ----
 def load_pdf(path: str) -> str:
     logger = logging.getLogger("app")
     try:
-        reader = PdfReader(path)
+        # Open the file explicitly to ensure the descriptor is closed promptly
+        with open(path, "rb") as f:
+            reader = PdfReader(f)
+            return "\n\n".join([page.extract_text() or "" for page in reader.pages])
     except Exception as e:
         logger.warning("pdf.open failed | file=%s | err=%s", path, e)
         raise
-    return "\n\n".join([page.extract_text() or "" for page in reader.pages])
 
 
 def load_docx(path: str) -> str:
@@ -277,15 +271,4 @@ def chunk_text(
     return character_chunk_text(text, chunk_size=chunk_size, overlap=overlap)
 
 
-def file_to_chunks(path: str, source_id: str) -> Iterable[DocumentChunk]:
-    text = load_file(path)
-    for i, part in enumerate(chunk_text(text)):
-        yield DocumentChunk(
-            text=part,
-            metadata={
-                "source": os.path.basename(path),
-                "source_path": os.path.abspath(path),
-                "source_id": source_id,
-                "chunk": str(i),
-            },
-        )
+ 

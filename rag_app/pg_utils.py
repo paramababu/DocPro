@@ -48,28 +48,28 @@ def cleanup_repo(repo_id: Optional[int] = None, *, url: Optional[str] = None, br
     ensure_schema()
     with get_conn() as conn:
         cur = conn.cursor()
-            if repo_id is not None:
-                cur.execute("SELECT 1 FROM repos WHERE repo_id = ?", (repo_id,))
-                exists = cur.fetchone() is not None
-                if exists:
-                    cur.execute("DELETE FROM repos WHERE repo_id = ?", (repo_id,))
-                    conn.commit()
-                    cur.close()
-                    return 1
+        if repo_id is not None:
+            cur.execute("SELECT 1 FROM repos WHERE repo_id = ?", (repo_id,))
+            exists = cur.fetchone() is not None
+            if exists:
+                cur.execute("DELETE FROM repos WHERE repo_id = ?", (repo_id,))
+                conn.commit()
                 cur.close()
-                return 0
-            elif url is not None:
-                cur.execute("SELECT repo_id FROM repos WHERE url = ? AND branch = ?", (url, branch))
-                row = cur.fetchone()
-                if row:
-                    cur.execute("DELETE FROM repos WHERE url = ? AND branch = ?", (url, branch))
-                    conn.commit()
-                    cur.close()
-                    return 1
+                return 1
+            cur.close()
+            return 0
+        elif url is not None:
+            cur.execute("SELECT repo_id FROM repos WHERE url = ? AND branch = ?", (url, branch))
+            row = cur.fetchone()
+            if row:
+                cur.execute("DELETE FROM repos WHERE url = ? AND branch = ?", (url, branch))
+                conn.commit()
                 cur.close()
-                return 0
-            else:
-                raise ValueError("Provide repo_id or url")
+                return 1
+            cur.close()
+            return 0
+        else:
+            raise ValueError("Provide repo_id or url")
 
 
 def reingest(project_path: str, *, cleanup: bool = True, branch: str = "local", commit_id: Optional[str] = None) -> None:

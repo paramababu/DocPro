@@ -4,7 +4,6 @@ import time
 import logging
 import ollama
 
-# Ensure project root (parent of this folder) is on sys.path
 _PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
@@ -48,7 +47,6 @@ def search_db(query, top_k=5):
     return scored[:top_k]
 
 def ask_llama(query, results):
-    # Build context from retrieved chunks
     context = "\n\n".join([c for _, c, _ in results])
     prompt = f"""
     You are a helpful assistant.

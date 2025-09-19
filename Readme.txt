@@ -1,15 +1,16 @@
-For virtual env
+For virtual env (use Python 3.12 recommended)
 
     # Windows (PowerShell)
-    python -m venv .venv
-    .venv\\Scripts\\Activate.ps1
+    py -3.12 -m venv .venv
+    .\.venv\Scripts\Activate.ps1
 
     # macOS/Linux
-    python -m venv .venv
+    python3.12 -m venv .venv
     source .venv/bin/activate
 
 install lib
-    pip install --upgrade pip
+    # Upgrade tooling and install
+    pip install -U pip setuptools wheel
     pip install -r requirements.txt
 
 run ollama

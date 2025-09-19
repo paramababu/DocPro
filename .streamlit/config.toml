@@ -1,0 +1,4 @@
+[server]
+# Use a lighter file watcher to reduce open file descriptors
+fileWatcherType = "poll"
+

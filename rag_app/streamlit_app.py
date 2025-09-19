@@ -12,7 +12,7 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from rag_app.db import get_conn, ensure_schema, vec_to_blob, blob_to_vec
-from rag_app import embedder, config, loader
+from rag_app import embedder, config, loader, dedup
 
 
 # Logging setup (controlled by LOG_LEVEL env; default INFO)
@@ -61,7 +61,6 @@ def search_db(query, top_k=5, *, repo_id: int | None = None):
     cur.close()
     conn.close()
 
-    # Rank in Python (cosine similarity)
     scored = []
     for r in rows:
         path, content, emb_blob = r[0], r[1], r[2]
@@ -118,35 +117,16 @@ def _ensure_session_repo() -> int:
     return rid
 
 
-def _delete_file_by_path(repo_id: int, path: str) -> None:
-    # Remove an existing file (and cascaded chunks) for this repo, if present
-    _log.debug("Deleting existing file if present | repo_id=%s path=%s", repo_id, path)
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM files WHERE repo_id = ? AND path = ?",
-            (int(repo_id), path),
-        )
-        conn.commit()
-        cur.close()
-
-
 def _delete_file_by_path_tx(cur, repo_id: int, path: str) -> None:
-    # Same as above but uses existing transaction/cursor to avoid cross-conn locks
-    cur.execute(
-        "DELETE FROM files WHERE repo_id = ? AND path = ?",
-        (int(repo_id), path),
-    )
+    cur.execute("DELETE FROM files WHERE repo_id = ? AND path = ?", (int(repo_id), path))
 
 
-# (No DB admin tools in POC)
 
 
-def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, int]:
+def index_uploaded_files(files, progress=None, progress_text=None) -> tuple[int, int, int]:
     repo_id = _ensure_session_repo()
     os.makedirs(config.UPLOADS_PATH, exist_ok=True)
 
-    # If user clicks index repeatedly with same files, avoid duplicate inserts
     try:
         fps = tuple((uf.name, uf.size) for uf in files)  # type: ignore[attr-defined]
     except Exception:
@@ -160,7 +140,6 @@ def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, in
     chunk_count = 0
     with get_conn() as conn:
         cur = conn.cursor()
-        # Preload existing content hashes for this repo
         try:
             cur.execute("SELECT content_hash FROM chunks WHERE repo_id = ? AND content_hash IS NOT NULL", (repo_id,))
             existing_hashes = {row[0] for row in cur.fetchall()}
@@ -174,30 +153,39 @@ def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, in
                 _log.info("Saved upload | path=%s size=%s", save_path, os.path.getsize(save_path))
                 text = loader.load_file(save_path)
                 _log.info("Loaded text | path=%s chars=%s", save_path, len(text))
-                # Chunk using configured method (semantic or character)
                 t_chunk = time.perf_counter()
                 chunks = loader.chunk_text(
                     text,
                     chunk_size=config.CHUNK_SIZE,
-                    overlap=0,  # no hard overlap; semantic splitter uses token_overlap internally
+                    overlap=0,
                     method=config.CHUNKING_METHOD,
                     token_target=config.CHUNK_SIZE_TOKENS,
                     token_overlap=config.CHUNK_OVERLAP_TOKENS,
                     sim_threshold=float(getattr(config, "SEMANTIC_SIM_THRESHOLD", 0.75)),
                 )
                 _log.info("Chunked | path=%s chunks=%s elapsed=%.3fs", save_path, len(chunks), time.perf_counter() - t_chunk)
+                # Optional deduplication (exact or semantic) based on config
+                try:
+                    if getattr(config, "DEDUP_METHOD", "none").lower() != "none":
+                        before = len(chunks)
+                        chunks = dedup.deduplicate_chunks(
+                            chunks,
+                            method=getattr(config, "DEDUP_METHOD", "none"),
+                            sim_threshold=getattr(config, "DEDUP_SIM_THRESHOLD", 0.96),
+                        )
+                        _log.info("Deduplicated | path=%s before=%s after=%s", save_path, before, len(chunks))
+                except Exception as e:
+                    _log.warning("Dedup failed | path=%s err=%s", save_path, e)
                 for ci, ch in enumerate(chunks):
                     _log.debug("Chunk %s | len=%s | head=%r", ci, len(ch), _snip(ch))
                 if not chunks:
                     continue
-                # Idempotent per file: drop existing row for same path if exists (same tx)
                 _delete_file_by_path_tx(cur, repo_id, save_path)
                 cur.execute(
                     "INSERT INTO files (repo_id, path, file_type) VALUES (?, ?, ?)",
                     (repo_id, save_path, os.path.splitext(save_path)[1]),
                 )
                 file_id = int(cur.lastrowid)
-                # Deduplicate by content hash within repo before embedding
                 def _hash_text(s: str) -> str:
                     return hashlib.sha256(s.strip().encode("utf-8", errors="ignore")).hexdigest()
 
@@ -214,15 +202,15 @@ def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, in
                     _log.info("All chunks for %s already exist; skipping.", save_path)
                     if progress:
                         progress.progress(100)
-                        if ptext:
-                            ptext.text(f"{uf.name}: 0/0 new chunks (all duplicates)")
+                        if progress_text:
+                            progress_text.text(f"{uf.name}: 0/0 new chunks (all duplicates)")
                     conn.commit()
                     file_count += 1
                     continue
 
-                # Progress-aware embedding and insert in batches
                 total = len(unique_pairs)
                 processed = 0
+                inserted_for_file = 0
                 BATCH = 32
                 t_emb = time.perf_counter()
                 for start in range(0, total, BATCH):
@@ -237,6 +225,7 @@ def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, in
                         )
                         if cur.rowcount:
                             existing_hashes.add(h)
+                            inserted_for_file += 1
                             chunk_count += 1
                             _log.debug("Inserted chunk | file_id=%s idx=%s len=%s hash=%s", file_id, idx, len(chunk), h[:8])
                     processed += len(batch)
@@ -244,30 +233,26 @@ def index_uploaded_files(files, progress=None, ptext=None) -> tuple[int, int, in
                     if progress:
                         pct = int(processed * 100 / total)
                         progress.progress(min(pct, 100))
-                        if ptext:
-                            ptext.text(f"{uf.name}: {processed}/{total} chunks indexed")
+                        if progress_text:
+                            progress_text.text(f"{uf.name}: {processed}/{total} chunks indexed")
                 _log.info(
                     "Embedded+Inserted | path=%s count=%s elapsed=%.3fs",
                     save_path,
                     total,
                     time.perf_counter() - t_emb,
                 )
-                _log.info("Inserted file | file_id=%s path=%s new_chunks=%s skipped_dupes=%s", file_id, save_path, len(vecs), len(chunks) - len(unique_pairs))
+                _log.info("Inserted file | file_id=%s path=%s new_chunks=%s skipped_dupes=%s", file_id, save_path, inserted_for_file, len(chunks) - len(unique_pairs))
                 file_count += 1
-                # Commit after each file to shorten write lock window
                 conn.commit()
-        # Final commit safeguard
         conn.commit()
         cur.close()
     _log.info("Indexing complete | repo_id=%s files=%s chunks=%s", repo_id, file_count, chunk_count)
     st.session_state["_indexed_fps"] = fps
     return repo_id, file_count, chunk_count
 
-# Streamlit UI
 st.set_page_config(page_title="DocPro RAG", layout="wide")
 st.title(" Ask Your File (SQLite + Ollama)")
 
-# Ensure schema (no admin UI in POC)
 _log.info("Ensuring DB schema")
 ensure_schema()
 
@@ -275,42 +260,51 @@ uploaded = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf","docx","doc"
 if uploaded:
     if st.button("Index uploaded file(s)"):
         progress = st.progress(0)
-        ptext = st.empty()
+        progress_text = st.empty()
         with st.spinner("Indexing files into SQLite..."):
             try:
-                rid, n_files, n_chunks = index_uploaded_files(uploaded, progress=progress, ptext=ptext)
+                rid, n_files, n_chunks = index_uploaded_files(uploaded, progress=progress, progress_text=progress_text)
             except Exception as e:
                 st.error(f"Indexing failed: {e}")
                 st.info("If this is a vector dimension mismatch, use 'Reset DB' in the sidebar and re-index.")
+                st.session_state["index_ready"] = False
             else:
                 progress.progress(100)
                 if n_files == 0 and n_chunks == 0:
                     st.info("Files already indexed (no changes).")
                 else:
                     st.success(f"Indexed {n_files} file(s), {n_chunks} chunk(s) into repo {rid}.")
+                st.session_state["index_ready"] = True
 
-query = st.text_input("Enter your question about the uploaded files:")
+has_repo = bool(st.session_state.get("repo_id"))
+if has_repo and "index_ready" not in st.session_state:
+    st.session_state["index_ready"] = True
 
-if st.button("Search"):
-    if query.strip():
-        with st.spinner("Searching your uploaded files..."):
-            rid = st.session_state.get("repo_id")
-            if not rid:
-                st.warning("Please upload and index a file first.")
-            else:
-                try:
-                    results = search_db(query, config.TOP_K, repo_id=int(rid))
-                except Exception as e:
-                    st.error(f"Search failed: {e}")
-                    st.info("If this is a vector dimension mismatch, recreate tables and re-index.")
+if st.session_state.get("index_ready"):
+    query = st.text_input("Enter your question about the uploaded files:")
+
+    if st.button("Search"):
+        if query.strip():
+            with st.spinner("Searching your uploaded files..."):
+                rid = st.session_state.get("repo_id")
+                if not rid:
+                    st.warning("Please upload and index a file first.")
                 else:
-                    # Answer first
-                    st.subheader("🤖 LLaMA Answer")
-                    answer = ask_llama(query, results)
-                    st.write(answer)
+                    try:
+                        results = search_db(query, config.TOP_K, repo_id=int(rid))
+                    except Exception as e:
+                        st.error(f"Search failed: {e}")
+                        st.info("If this is a vector dimension mismatch, recreate tables and re-index.")
+                    else:
+                        # Answer first
+                        st.subheader("🤖 LLaMA Answer")
+                        answer = ask_llama(query, results)
+                        st.write(answer)
 
-                    # Then supporting chunks
-                    st.subheader("🔎 Retrieved Chunks")
-                    for path, content, dist in results:
-                        st.markdown(f"**{path}** (Score={1-dist:.3f})")
-                        st.code((content[:1000] + "...") if len(content) > 1000 else content)
+                        # Then supporting chunks
+                        st.subheader("🔎 Retrieved Chunks")
+                        for path, content, dist in results:
+                            st.markdown(f"**{path}** (Score={1-dist:.3f})")
+                            st.code((content[:1000] + "...") if len(content) > 1000 else content)
+else:
+    st.info("Upload and index file(s) to enable search.")

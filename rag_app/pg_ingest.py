@@ -10,7 +10,7 @@ _PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
-from rag_app import loader, embedder, config
+from rag_app import loader, embedder, config, dedup
 from rag_app.db import get_conn, ensure_schema, vec_to_blob
 
 
@@ -34,7 +34,6 @@ def ingest_db(project_path: str) -> None:
     with get_conn() as conn:
         cur = conn.cursor()
             repo_url = str(Path(project_path).resolve())
-            # Try to reuse existing repo row if present
             cur.execute("SELECT repo_id FROM repos WHERE url = ? AND branch = ?", (repo_url, "local"))
             row = cur.fetchone()
             if row:
@@ -59,6 +58,17 @@ def ingest_db(project_path: str) -> None:
                 t_chunk = time.perf_counter()
                 chunks = loader.chunk_text(text)
                 _log.info("Chunked | path=%s chunks=%s elapsed=%.3fs", str(file), len(chunks), time.perf_counter() - t_chunk)
+                try:
+                    if getattr(config, "DEDUP_METHOD", "none").lower() != "none":
+                        before = len(chunks)
+                        chunks = dedup.deduplicate_chunks(
+                            chunks,
+                            method=getattr(config, "DEDUP_METHOD", "none"),
+                            sim_threshold=getattr(config, "DEDUP_SIM_THRESHOLD", 0.96),
+                        )
+                        _log.info("Deduplicated | path=%s before=%s after=%s", str(file), before, len(chunks))
+                except Exception as e:
+                    _log.warning("Dedup failed | path=%s err=%s", str(file), e)
                 if not chunks:
                     continue
 
