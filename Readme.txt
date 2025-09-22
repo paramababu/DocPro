@@ -25,10 +25,5 @@ SQLite setup
 Run UI (SQLite-backed):
     streamlit run rag_app/streamlit_app.py
 
-Maintenance utilities
-    # List repos stored in SQLite
-    python -m rag_app.pg_utils list
 
-    # Prune session repos older than 24 hours (default)
-    python -m rag_app.pg_utils prune --hours 24
     
