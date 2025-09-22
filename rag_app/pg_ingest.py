@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import logging
+import hashlib
 from pathlib import Path
 from typing import Iterable
 
@@ -32,19 +33,19 @@ def ingest_db(project_path: str) -> None:
     _log.info("ingest_db start | project_path=%s", project_path)
     ensure_schema()
     with get_conn() as conn:
-        cur = conn.cursor()
+        with conn.cursor() as cur:
             repo_url = str(Path(project_path).resolve())
-            cur.execute("SELECT repo_id FROM repos WHERE url = ? AND branch = ?", (repo_url, "local"))
+            cur.execute("SELECT repo_id FROM repos WHERE url = %s AND branch = %s", (repo_url, "local"))
             row = cur.fetchone()
             if row:
                 repo_id = row[0]
                 _log.info("Using existing repo | repo_id=%s", repo_id)
             else:
                 cur.execute(
-                    "INSERT INTO repos (url, branch) VALUES (?, ?)",
+                    "INSERT INTO repos (url, branch) VALUES (%s, %s) RETURNING repo_id",
                     (repo_url, "local"),
                 )
-                repo_id = int(cur.lastrowid)
+                repo_id = int(cur.fetchone()[0])
                 _log.info("Created repo | repo_id=%s", repo_id)
 
             for file in _iter_project_files(project_path):
@@ -73,24 +74,34 @@ def ingest_db(project_path: str) -> None:
                     continue
 
                 cur.execute(
-                    "INSERT INTO files (repo_id, path, file_type, commit_id) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO files (repo_id, path, file_type, commit_id) VALUES (%s, %s, %s, %s) RETURNING file_id",
                     (repo_id, str(file), file.suffix, None),
                 )
-                file_id = int(cur.lastrowid)
+                file_id = int(cur.fetchone()[0])
 
                 t_emb = time.perf_counter()
                 vecs = embedder.embed_texts(chunks)
-                _log.info("Embedded | path=%s dim=%s count=%s elapsed=%.3fs", str(file), len(vecs[0]) if len(vecs) else 0, len(vecs), time.perf_counter() - t_emb)
+                _log.info(
+                    "Embedded | path=%s dim=%s count=%s elapsed=%.3fs",
+                    str(file),
+                    len(vecs[0]) if len(vecs) else 0,
+                    len(vecs),
+                    time.perf_counter() - t_emb,
+                )
                 for idx, (chunk, vec) in enumerate(zip(chunks, vecs)):
                     emb_blob = vec_to_blob(vec)
+                    content_hash = hashlib.sha256(chunk.strip().encode("utf-8", errors="ignore")).hexdigest()
                     cur.execute(
-                        "INSERT INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path) VALUES (?, ?, ?, ?, ?, ?)",
-                        (file_id, idx, chunk, emb_blob, repo_id, str(file)),
+                        """
+                        INSERT INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (repo_id, content_hash) DO NOTHING
+                        """,
+                        (file_id, idx, chunk, emb_blob, repo_id, str(file), content_hash),
                     )
                 _log.info("Inserted file | file_id=%s path=%s chunks=%s", file_id, str(file), len(chunks))
         conn.commit()
-        cur.close()
-    _log.info("✅ Project ingested into SQLite with embeddings!")
+    _log.info("✅ Project ingested into PostgreSQL with embeddings!")
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ def search_db(query, top_k=5, *, repo_id: int | None = None):
             SELECT files.path, chunks.content, chunks.embedding
             FROM chunks
             JOIN files ON chunks.file_id = files.file_id
-            WHERE files.repo_id = ?
+            WHERE files.repo_id = %s
             """,
             (repo_id,),
         )
@@ -106,10 +106,10 @@ def _ensure_session_repo() -> int:
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO repos (url, branch) VALUES (?, ?)",
+            "INSERT INTO repos (url, branch) VALUES (%s, %s) RETURNING repo_id",
             ("streamlit://session", "session"),
         )
-        rid = int(cur.lastrowid)
+        rid = int(cur.fetchone()[0])
         conn.commit()
         cur.close()
     st.session_state["repo_id"] = rid
@@ -118,7 +118,7 @@ def _ensure_session_repo() -> int:
 
 
 def _delete_file_by_path_tx(cur, repo_id: int, path: str) -> None:
-    cur.execute("DELETE FROM files WHERE repo_id = ? AND path = ?", (int(repo_id), path))
+    cur.execute("DELETE FROM files WHERE repo_id = %s AND path = %s", (int(repo_id), path))
 
 
 
@@ -141,7 +141,10 @@ def index_uploaded_files(files, progress=None, progress_text=None) -> tuple[int,
     with get_conn() as conn:
         cur = conn.cursor()
         try:
-            cur.execute("SELECT content_hash FROM chunks WHERE repo_id = ? AND content_hash IS NOT NULL", (repo_id,))
+            cur.execute(
+                "SELECT content_hash FROM chunks WHERE repo_id = %s AND content_hash IS NOT NULL",
+                (repo_id,),
+            )
             existing_hashes = {row[0] for row in cur.fetchall()}
         except Exception:
             existing_hashes = set()
@@ -182,10 +185,10 @@ def index_uploaded_files(files, progress=None, progress_text=None) -> tuple[int,
                     continue
                 _delete_file_by_path_tx(cur, repo_id, save_path)
                 cur.execute(
-                    "INSERT INTO files (repo_id, path, file_type) VALUES (?, ?, ?)",
+                    "INSERT INTO files (repo_id, path, file_type) VALUES (%s, %s, %s) RETURNING file_id",
                     (repo_id, save_path, os.path.splitext(save_path)[1]),
                 )
-                file_id = int(cur.lastrowid)
+                file_id = int(cur.fetchone()[0])
                 def _hash_text(s: str) -> str:
                     return hashlib.sha256(s.strip().encode("utf-8", errors="ignore")).hexdigest()
 
@@ -220,7 +223,11 @@ def index_uploaded_files(files, progress=None, progress_text=None) -> tuple[int,
                     for (idx, chunk, h), vec in zip(batch, vecs):
                         emb_blob = vec_to_blob(vec)
                         cur.execute(
-                            "INSERT OR IGNORE INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            """
+                            INSERT INTO chunks (file_id, chunk_index, content, embedding, repo_id, file_path, content_hash)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (repo_id, content_hash) DO NOTHING
+                            """,
                             (file_id, idx, chunk, emb_blob, repo_id, save_path, h),
                         )
                         if cur.rowcount:
@@ -251,7 +258,7 @@ def index_uploaded_files(files, progress=None, progress_text=None) -> tuple[int,
     return repo_id, file_count, chunk_count
 
 st.set_page_config(page_title="DocPro RAG", layout="wide")
-st.title(" Ask Your File (SQLite + Ollama)")
+st.title(" Ask Your File (PostgreSQL + Ollama)")
 
 _log.info("Ensuring DB schema")
 ensure_schema()
@@ -261,7 +268,7 @@ if uploaded:
     if st.button("Index uploaded file(s)"):
         progress = st.progress(0)
         progress_text = st.empty()
-        with st.spinner("Indexing files into SQLite..."):
+        with st.spinner("Indexing files into PostgreSQL..."):
             try:
                 rid, n_files, n_chunks = index_uploaded_files(uploaded, progress=progress, progress_text=progress_text)
             except Exception as e:

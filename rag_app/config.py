@@ -23,11 +23,10 @@ TOP_K = int(os.getenv("TOP_K", "5"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
 UPLOADS_PATH = "uploads"
 
-DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "docpro.sqlite3"))
+DB_DSN = os.getenv("DB_DSN", "postgresql://localhost/docpro")
 
 USE_SPACY_SENTENCIZER = os.getenv("USE_SPACY_SENTENCIZER", "false").lower() in ("1", "true", "yes", "on")
 SPACY_LANGUAGE = os.getenv("SPACY_LANGUAGE", "en")
 
 DEDUP_METHOD = os.getenv("DEDUP_METHOD", "none").lower()  # 'none' | 'exact' | 'semantic'
 DEDUP_SIM_THRESHOLD = float(os.getenv("DEDUP_SIM_THRESHOLD", "0.96"))
-

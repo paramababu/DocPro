@@ -4,19 +4,17 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
 from .db import get_conn, ensure_schema
-from . import config
 from .pg_ingest import ingest_db
 
 
 def list_repos() -> List[Tuple[int, str, str, datetime]]:
     ensure_schema()
     with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT repo_id, url, branch, created_at FROM repos ORDER BY created_at DESC"
-        )
-        rows = cur.fetchall()
-        cur.close()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT repo_id, url, branch, created_at FROM repos ORDER BY created_at DESC"
+            )
+            rows = cur.fetchall()
     return [(int(r[0]), str(r[1]), str(r[2]), r[3]) for r in rows]
 
 
@@ -28,15 +26,14 @@ def prune_session_repos(prefix: str = "vectorstore://", older_than_hours: int = 
     ensure_schema()
     cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
     with get_conn() as conn:
-        cur = conn.cursor()
-        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
-        cur.execute(
-            "DELETE FROM repos WHERE url LIKE ? AND created_at < ?",
-            (prefix + "%", cutoff_str),
-        )
-        deleted = cur.rowcount
+        with conn.cursor() as cur:
+            cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+            cur.execute(
+                "DELETE FROM repos WHERE url LIKE %s AND created_at < %s",
+                (prefix + "%", cutoff_str),
+            )
+            deleted = cur.rowcount
         conn.commit()
-        cur.close()
     return max(deleted, 0)
 
 
@@ -47,29 +44,25 @@ def cleanup_repo(repo_id: Optional[int] = None, *, url: Optional[str] = None, br
     """
     ensure_schema()
     with get_conn() as conn:
-        cur = conn.cursor()
-        if repo_id is not None:
-            cur.execute("SELECT 1 FROM repos WHERE repo_id = ?", (repo_id,))
-            exists = cur.fetchone() is not None
-            if exists:
-                cur.execute("DELETE FROM repos WHERE repo_id = ?", (repo_id,))
-                conn.commit()
-                cur.close()
-                return 1
-            cur.close()
-            return 0
-        elif url is not None:
-            cur.execute("SELECT repo_id FROM repos WHERE url = ? AND branch = ?", (url, branch))
-            row = cur.fetchone()
-            if row:
-                cur.execute("DELETE FROM repos WHERE url = ? AND branch = ?", (url, branch))
-                conn.commit()
-                cur.close()
-                return 1
-            cur.close()
-            return 0
-        else:
-            raise ValueError("Provide repo_id or url")
+        with conn.cursor() as cur:
+            if repo_id is not None:
+                cur.execute("SELECT 1 FROM repos WHERE repo_id = %s", (repo_id,))
+                exists = cur.fetchone() is not None
+                if exists:
+                    cur.execute("DELETE FROM repos WHERE repo_id = %s", (repo_id,))
+                    conn.commit()
+                    return 1
+                return 0
+            elif url is not None:
+                cur.execute("SELECT repo_id FROM repos WHERE url = %s AND branch = %s", (url, branch))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("DELETE FROM repos WHERE url = %s AND branch = %s", (url, branch))
+                    conn.commit()
+                    return 1
+                return 0
+            else:
+                raise ValueError("Provide repo_id or url")
 
 
 def reingest(project_path: str, *, cleanup: bool = True, branch: str = "local", commit_id: Optional[str] = None) -> None:
@@ -83,23 +76,22 @@ def reingest(project_path: str, *, cleanup: bool = True, branch: str = "local", 
 
     repo_url = str(Path(project_path).resolve())
     with get_conn() as conn:
-        cur = conn.cursor()
-        if cleanup:
-            cur.execute("DELETE FROM repos WHERE url = ? AND branch = ?", (repo_url, branch))
-        if commit_id is not None:
-            cur.execute(
-                "INSERT INTO repos (url, branch, commit_id) VALUES (?, ?, ?)",
-                (repo_url, branch, commit_id),
-            )
-            conn.commit()
-        cur.close()
+        with conn.cursor() as cur:
+            if cleanup:
+                cur.execute("DELETE FROM repos WHERE url = %s AND branch = %s", (repo_url, branch))
+            if commit_id is not None:
+                cur.execute(
+                    "INSERT INTO repos (url, branch, commit_id) VALUES (%s, %s, %s)",
+                    (repo_url, branch, commit_id),
+                )
+                conn.commit()
     ingest_db(project_path)
 
 
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="Small SQLite RAG utilities")
+    ap = argparse.ArgumentParser(description="Small PostgreSQL RAG utilities")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("list", help="List repos")

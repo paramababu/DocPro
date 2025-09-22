@@ -18,11 +18,14 @@ run ollama
     ollama pull llama3.2:3b
     ollama pull nomic-embed-text
 
-SQLite setup
-    # Default DB path: rag_app/../docpro.sqlite3 (config.DB_PATH)
-    # No DB install needed. Schema is auto-created.
+PostgreSQL setup
+    # Ensure PostgreSQL 14+ is running and a database exists, e.g.:
+    #   createdb docpro
+    # Configure connection string via DB_DSN (default: postgresql://localhost/docpro)
+    #   export DB_DSN=postgresql://user:password@localhost:5432/docpro
+    # Schema is created automatically on first run.
 
-Run UI (SQLite-backed):
+Run UI (PostgreSQL-backed):
     streamlit run rag_app/streamlit_app.py
 
 
